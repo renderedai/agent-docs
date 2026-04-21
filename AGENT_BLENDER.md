@@ -1,381 +1,393 @@
-# Agent Notes — Warehouse Fulfillment Center Channel
+# Blender Patterns for Rendered.ai Channel Development
 
-This document is **specific to this repo/channel** (local config: `external-warehouse.yml`).
+Generic Blender patterns and best practices for AI agents working on Rendered.ai channels that use Blender for rendering.
 
-For general Rendered.ai channel development guidance, see: `/ana/AGENT.md`.
-
----
-
-## Best Practices — Running Tests
-
-### Always run `ana` from `/ana`
-Run with working directory set to `/ana`.
-
-### Always create the output directory first
-If you use `--logfile`, the directory must already exist.
-
-```bash
-mkdir -p /home/anadev/test_runs/warehouse_preview
-ana --graph /ana/graphs/warehouse_anomaly.yml \
-  --output /home/anadev/test_runs/warehouse_preview \
-  --logfile /home/anadev/test_runs/warehouse_preview/ana.log
-```
-
-### Prefer `--preview` for iteration
-This channel uses `ctx.preview` in the render node to reduce work during iteration.
-
-```bash
-mkdir -p /home/anadev/test_runs/warehouse_preview
-ana --preview --graph /ana/graphs/warehouse_anomaly.yml \
-  --output /home/anadev/test_runs/warehouse_preview \
-  --logfile /home/anadev/test_runs/warehouse_preview/ana.log
-```
-
-Preview outputs a `preview.png` in the run directory in addition to normal dataset artifacts.
-
-Preview can still be slow when placing many warehouse objects. To skip expensive object
-randomization steps (material/texture variations), set:
-
-```bash
-export SINGLEBLENDERFILE_SKIP_OBJECT_RANDOMIZE=1
-```
-
-Example:
-
-```bash
-mkdir -p /home/anadev/test_runs/preview_fast
-SINGLEBLENDERFILE_SKIP_OBJECT_RANDOMIZE=1 \
-ana --preview --graph /ana/graphs/warehouse_anomaly.yml \
-  --output /home/anadev/test_runs/preview_fast
-```
-
-Blender/HumGen output can be noisy; the render node redirects most Blender operator output to a per-run log file in the output directory.
-
-### Know where to look for artifacts
-A successful run typically creates:
-
-- `preview.png` (preview runs)
-- `images/*.jpg`
-- `masks/*.png`
-- `annotations/*-ana.json`
-- `metadata/*-metadata.json`
-- `bbox3d_vis/*-annotated-ground_point.jpg` (when ground-point viz is enabled)
-- `*-blender_ops.log` (Blender operator output bundled with the dataset zip; does not reliably include Python `logger.info` output)
-- `test/*-blender_file.blend` (optional blend snapshot for post-run inspection; off by default)
-
-### Platform logs (source of truth)
-When debugging platform runs, use the **official platform log** (downloaded via the web app or SDK). In this repo, those downloaded logs have been saved under `/ana/` with timestamped names like:
-
-`/ana/2026-04-06T16_35_14-06_00.log`
-
-This log is the authoritative place to look for:
-
-- Node execution messages
-- Python `logger.info` output from `warehouse_render.py`, `scene.py`, `ana_object.py`, etc.
-
-The `0000000000-blender_ops.log` file inside the dataset zip is still useful for Blender-level warnings/errors, but it should not be treated as the primary record of Python logging.
-
-### Replay a platform frame locally (seed + interp_num + camera)
-Goal: reproduce a specific platform-rendered frame deterministically for debugging (e.g. missing annotations).
-
-Inputs you need from the platform output bundle:
-
-- `graph.json`
-- `metadata/*-metadata.json` (for `seed` and `interp_num`)
-- The target camera name (e.g. `Camera_021`) and frame index (usually `0000000000` in these runs)
-
-Steps:
-
-1. Convert the exported `graph.json` to a local `.yml` graph.
-   - The minimal requirement is that node `values` and the `links` into `Warehouse Scene Render` match.
-   - If you only want a single frame/camera for debugging, keep the graph unchanged and force the camera via env var (below).
-2. Run locally using the exact `seed` + `interp_num` from platform `*-metadata.json`.
-3. Force a specific camera (and optionally time-of-day) via env vars.
-4. Enable a debug `.blend` snapshot if you need to inspect the scene in Blender.
-
-Example (replay Camera_021):
-
-```bash
-mkdir -p /home/anadev/test_runs/replay_platform
-SINGLEBLENDERFILE_CAMERA=021 \
-SINGLEBLENDERFILE_SAVE_PREVIEW_BLEND=1 \
-ana --graph /path/to/replay_graph.yml \
-  --seed <seed_from_platform_metadata> \
-  --interp_num <interp_num_from_platform_metadata> \
-  --output /home/anadev/test_runs/replay_platform
-```
-
-Optional time-of-day override:
-
-```bash
-export SINGLEBLENDERFILE_TIME_OF_DAY='Work Hours'
-```
-
-### Validate annotations vs masks (common failure mode)
-If you see an anomaly object (bag, backpack, package) in the RGB image but it's missing from `*-ana.json`, check whether it appears in the instance mask.
-
-Quick check: compare the set of non-zero mask IDs vs `annotations[].id`.
-If there are IDs present in the mask but absent from `*-ana.json`, the renderer produced a mask instance that did not get exported into annotations.
-
-### Anomaly object annotations: tiny mask fragments can be dropped
-Anomaly object masks can be extremely sparse (only a few dozen pixels) when the object is far from the warehouse surveillance camera. In that case, the mask may contain the object instance ID, but `compute_polygons()` can still return `None` because of the minimum bbox size filter.
-
-Implementation detail:
-
-- `SingleBlenderFile/lib/bbox.py:compute_polygons()` drops polygons whose bounding rect has width/height smaller than `MIN_FEATURE_SIZE`.
-- To avoid dropping real-but-small anomaly object masks, these objects use a smaller minimum feature size than normal warehouse equipment.
-
-If platform runs show nonzero IDs in `masks/*.png` but `annotations/*-ana.json` is empty, this threshold is the first thing to check.
-
-### Platform debugging: mask pixel diagnostics
-`AnaScene.write_ana_annotations()` logs per-camera mask stats to help diagnose whether objects are present in the mask:
-
-- `AnaScene mask file: ... nonzero=<count> uniq_ids=[...]`
-- `AnaScene mask pixels: ... object_type=<...> pixels=<count>`
-
-These messages are emitted via both `logger.info` and `print()` so they show up in platform-captured logs.
+For general channel development (non-Blender-specific), see: `AGENT.md`.
+For SDK/platform operations, see: `AGENT_SDK.md`.
 
 ---
 
-## Debug Environment Variables (SingleBlenderFile Channel)
+## SCENE MANAGEMENT
 
-This channel supports several debug environment variables for local development:
+### Loading Blend Files
 
-```bash
-# Performance optimization
-export SINGLEBLENDERFILE_SKIP_OBJECT_RANDOMIZE=1  # Skip expensive object material randomization
+```python
+from anatools.lib.package_utils import get_volume_path
 
-# Camera and rendering control
-export SINGLEBLENDERFILE_CAMERA=021               # Force specific camera (e.g. 021 or Camera_021)
-export SINGLEBLENDERFILE_LIGHTING='Day Shift'     # Override lighting setting
+# Load a blend file from a volume
+blend_path = get_volume_path('my_package', 'my_volume:scenes/my_scene.blend')
 
-# Debug outputs and logging
-export SINGLEBLENDERFILE_SAVE_PREVIEW_BLEND=1     # Save .blend snapshot in output/test/
-export SINGLEBLENDERFILE_LOG_BLEND_PATH=1         # Log which blend file was opened
-export SINGLEBLENDERFILE_KEEP_OPEN_LOG=1          # Preserve blender_open.log in output
+# Append specific objects
+with bpy.data.libraries.load(blend_path, link=False) as (data_from, data_to):
+    data_to.objects = [name for name in data_from.objects if name.startswith("MyPrefix")]
 
-# Raw IndexOB debugging (for mask issues)
-export SINGLEBLENDERFILE_RAW_INDEXOB_DEBUG=1      # Render standalone IndexOB EXR
-export SINGLEBLENDERFILE_RAW_INDEXOB_CAMERA=123   # Optional camera filter for IndexOB debug
+# Link appended objects to the active scene
+for obj in data_to.objects:
+    bpy.context.scene.collection.objects.link(obj)
 ```
 
-**Usage examples**:
-```bash
-# Fast preview with single camera
-SINGLEBLENDERFILE_SKIP_OBJECT_RANDOMIZE=1 \
-SINGLEBLENDERFILE_CAMERA=021 \
-ana --preview --output /home/anadev/fast_test
+### Scene Cleanup
 
-# Debug blend with snapshot
-SINGLEBLENDERFILE_SAVE_PREVIEW_BLEND=1 \
-ana --graph /ana/graphs/warehouse_anomaly.yml \
-  --output /home/anadev/debug_blend
+```python
+# Remove all objects (typically done in setup.py)
+for obj in bpy.data.objects:
+    bpy.data.objects.remove(obj, do_unlink=True)
+
+# Remove orphan data blocks
+for block in bpy.data.meshes:
+    if block.users == 0:
+        bpy.data.meshes.remove(block)
+```
+
+### Collection Management
+
+```python
+# Find or create a collection
+def get_or_create_collection(name, parent=None):
+    if name in bpy.data.collections:
+        return bpy.data.collections[name]
+    col = bpy.data.collections.new(name)
+    (parent or bpy.context.scene.collection).children.link(col)
+    return col
+
+# Hide a collection from render
+collection.hide_render = True
+
+# Move an object to a specific collection
+target_collection.objects.link(obj)
+for col in obj.users_collection:
+    if col != target_collection:
+        col.objects.unlink(obj)
 ```
 
 ---
 
-## General Learnings — Blender / Channel Testing
+## OBJECT PLACEMENT & TRANSFORMS
 
-### Prefer a small external “channel-like” render to validate visibility
-When debugging object visibility (e.g. anomaly objects), it's often faster to validate directly in Blender (outside `ana`) before chasing annotation/mask pipeline issues.
+### Setting Object Transforms
 
-Useful repo scripts:
+```python
+from mathutils import Vector, Euler
+import math
 
-- `/ana/test_object_visibility.py`
-  - Renders `IndexOB` for warehouse cameras and counts anomaly object pixels per camera.
-  - Good for finding a "known good" camera.
-- `/ana/test_channel_like_object_render.py`
-  - Uses a minimal compositor (`Render Layers -> IndexOB -> EXR`) and counts pixels.
-  - Good as a deterministic regression (e.g. standardize on `Camera_123`, threshold 100).
+# Set position
+obj.location = Vector((x, y, z))
 
-### If masks are empty, confirm whether **raw IndexOB** is empty first
-If `masks/*.png` is all-zero (or near-zero), determine whether:
-- The underlying `IndexOB` pass is empty (scene/camera/visibility issue), or
-- The mask pipeline is broken (compositor nodes / ID Mask wiring).
+# Set rotation (Euler angles in radians)
+obj.rotation_euler = Euler((0.0, 0.0, math.radians(90)), 'XYZ')
 
-The render node supports an env-var gated raw IndexOB debug mode:
-
-```bash
-export SINGLEBLENDERFILE_RAW_INDEXOB_DEBUG=1
-export SINGLEBLENDERFILE_RAW_INDEXOB_CAMERA=123  # optional (e.g. 123 or Camera_123)
+# Force scene graph update after transform changes
+bpy.context.view_layer.update()
 ```
 
-This will:
+### Avoid Accidental Transform Mutation
 
-- Render a standalone IndexOB EXR into `output/raw_indexob_exr/`
-- Print `nonzero` and `uniq_ids` for the selected camera
-- Print runtime transforms for the camera and a small set of anomaly objects (useful for catching transform mutation)
+A common failure mode is resetting transforms on objects that should keep their original placement (e.g. furniture, props, infrastructure).
 
-### Confirm which blend file was opened
-When a new `.blend` arrives (e.g. from a contractor), confirm the channel opened the file you expect:
+**Symptoms:**
+- Objects visible in the blend file disappear in channel renders
+- Props appear in different locations between runs
+- Raw IndexOB debug shows near-zero pixels for objects that should be visible
 
-```bash
-export SINGLEBLENDERFILE_LOG_BLEND_PATH=1
-export SINGLEBLENDERFILE_KEEP_OPEN_LOG=1
+**Fix pattern:**
+- Filter placement/animation loops to operate only on the objects you intend to move
+- Never reset `.location` / `.rotation_euler` on static scene objects
+- Use explicit object type checks before applying transforms
+
+### Reading Geometry Nodes Modifier Properties
+
+Geometry Nodes modifiers expose socket values as modifier properties. Socket identifiers (e.g. `Socket_8`) are **not stable** across blend file versions. Use dynamic name lookup:
+
+```python
+def get_geonode_inputs(obj, modifier_name_contains='GeometryNodes'):
+    """Read inputs from a Geometry Nodes modifier by input name."""
+    results = {}
+    for mod in obj.modifiers:
+        if modifier_name_contains not in mod.name:
+            continue
+        # Collect raw modifier properties
+        props = {}
+        try:
+            for key in mod.keys():
+                props[key] = mod[key]
+        except Exception:
+            pass
+        # Map by human-readable input name
+        ng = getattr(mod, 'node_group', None)
+        if ng and hasattr(ng, 'interface') and hasattr(ng.interface, 'items_tree'):
+            for item in ng.interface.items_tree:
+                if not hasattr(item, 'identifier'):
+                    continue
+                val = props.get(item.identifier)
+                if val is not None:
+                    results[item.name] = val
+        # Fallback: return raw socket properties
+        if not results:
+            results = props
+        break
+    return results
 ```
 
-`SINGLEBLENDERFILE_KEEP_OPEN_LOG=1` preserves `blender_open.log` in the run output folder.
+This is important when reading action types, collection assignments, or any parameter from Geometry Nodes setups.
 
-### Avoid accidental transform mutation of non-person props
-A common failure mode is accidentally adding warehouse infrastructure (conveyors, racks, etc.) into `ana_scene.objects` and then running "anomaly object placement" code on all objects.
+---
 
-Symptom:
+## CAMERAS
 
-- Warehouse geometry looks correct, but anomaly objects vanish or move between runs.
-- Raw IndexOB debug shows near-zero pixels even though the object is visible in external tests.
+### Iterating Over Cameras
 
-Fix pattern:
+```python
+cameras = [obj for obj in bpy.data.objects if obj.type == 'CAMERA']
 
-- Filter placement loops to operate only on anomaly objects (bags, backpacks, packages).
-- Do not reset `.location` / `.rotation_euler` on warehouse infrastructure roots.
-
-### Suggested workflow when receiving a new contractor `.blend`
-1. Run external validation first (fast):
-   - Use `/ana/test_channel_like_object_render.py` (standard: `Camera_123`, threshold `100`) to ensure anomaly objects are visible in IndexOB.
-2. Run a single-camera channel replay:
-   - Force a camera via `SINGLEBLENDERFILE_CAMERA=123`
-   - Enable raw IndexOB debug if needed (above)
-   - Optionally save a snapshot blend with `SINGLEBLENDERFILE_SAVE_PREVIEW_BLEND=1`
-3. If channel run differs from the external validation:
-   - Check raw IndexOB debug output (`nonzero`, `uniq_ids`)
-   - Check runtime transforms logged for camera + anomaly objects
-
-### Optional debug overlays (library helper)
-For local sanity checking, you can generate overlay imagery from the saved RGB image using:
-
-`SingleBlenderFile/lib/debug_overlays.py:write_debug_overlays(image_file, vis_dir)`
-
-This wraps the existing `draw(...)` helper to write debug overlays (e.g. `box_3d`, `ground_point`) without keeping large commented blocks in the render node.
-
-### Quick annotation sanity check
-Use this to confirm you got the expected number of annotations and key fields:
-
-```bash
-python3 - <<'PY'
-import json, glob
-files = sorted(glob.glob('/home/anadev/test_runs/warehouse_preview/annotations/*.json'))
-print(f'{len(files)} annotation file(s)')
-for fn in files:
-    with open(fn) as f:
-        data = json.load(f)
-    anns = data.get('annotations', [])
-    print(f'  {fn.split("/")[-1]}: {len(anns)} annotations')
-    for a in anns:
-        oid = a.get('object_id','?')
-        obj_type = a.get('object_type','?')
-        bbox = a.get('bbox','?')
-        anomaly = a.get('is_anomaly','?')
-        print(f'    {oid:16s} type={obj_type:12s} anomaly={anomaly:8s} bbox={bbox}')
-PY
+for cam in cameras:
+    bpy.context.scene.camera = cam
+    bpy.context.scene.render.filepath = f"/tmp/render_{cam.name}.png"
+    bpy.ops.render.render(write_still=True)
 ```
 
-### Inspect the saved blend snapshot (optional but powerful)
-The render node can write a blend snapshot into `output/test/*-blender_file.blend` for post-run inspection.
+### Checking If a Point Is In Camera Frame
 
-This is gated behind an environment variable because it can create large files:
+```python
+from bpy_extras.object_utils import world_to_camera_view
 
-```bash
-export SINGLEBLENDERFILE_SAVE_PREVIEW_BLEND=1
+def is_in_frame(point, camera, scene=None):
+    """Check if a 3D point is within the camera's view frustum."""
+    scene = scene or bpy.context.scene
+    co = world_to_camera_view(scene, camera, Vector(point))
+    return 0.0 <= co.x <= 1.0 and 0.0 <= co.y <= 1.0 and co.z > 0.0
 ```
 
-Then run normally (no `--preview` required):
+### Camera Coordinate Conventions
 
-```bash
-mkdir -p /home/anadev/test_runs/debug_blend
-SINGLEBLENDERFILE_SAVE_PREVIEW_BLEND=1 \
-ana --graph /ana/graphs/warehouse_anomaly.yml \
-  --output /home/anadev/test_runs/debug_blend
+- Blender world: `+Z` is up, `+X` is right, `+Y` is forward (in Top view)
+- Camera view: `co.x` = horizontal (0=left, 1=right), `co.y` = vertical (0=bottom, 1=top), `co.z` = depth (>0 = in front)
+
+---
+
+## RENDERING
+
+### Cycles Setup (GPU)
+
+```python
+bpy.context.scene.render.engine = 'CYCLES'
+cyclesprefs = bpy.context.preferences.addons['cycles'].preferences
+cyclesprefs.compute_device_type = 'CUDA'
+cyclesprefs.get_devices()
+
+# Enable all GPU devices
+for device in cyclesprefs.devices:
+    device.use = True
+
+bpy.context.scene.cycles.device = 'GPU'
 ```
 
-You can open the saved blend locally in Blender, or open it headless and print debug info.
+### Render Settings
 
-Example pattern (create a custom script based on the template):
+```python
+scene = bpy.context.scene
 
-```bash
-# Copy and modify test_bpy.py to target your specific blend file
-cp /ana/test_bpy.py /home/anadev/my_blend_inspector.py
-# Edit the BLEND_FILE path in your copy to point to your saved blend
-# Then run:
-blender --background --python /home/anadev/my_blend_inspector.py 2>&1 | grep -E "^(HG_|===)"
+# Resolution
+scene.render.resolution_x = 1920
+scene.render.resolution_y = 1080
+scene.render.resolution_percentage = 100
+
+# Output format
+scene.render.image_settings.file_format = 'PNG'
+scene.render.image_settings.color_mode = 'RGBA'
+
+# Samples (lower = faster preview)
+scene.cycles.samples = 128
+scene.cycles.preview_samples = 32
 ```
 
-The `test_bpy.py` script serves as a template - copy it and modify the `BLEND_FILE` path to target your specific run directory:
-`/home/anadev/<run_dir>/test/*-blender_file.blend`.
-
-### Inspect a blend and re-annotate it with current code
-Two useful scripts live at repo root:
-
-- `test_bpy.py`
-  - Template script for blend file inspection. Copy and modify the `BLEND_FILE` path to target your specific blend file. Prints collection visibility, warehouse objects, camera info, and object placement.
-- `test_reannotate_from_blend.py`
-  - Loads a saved `*-blender_file.blend` and re-runs the annotation code path without re-running placement.
-
-Example (inspect a blend):
+### Background Rendering
 
 ```bash
-blender --background --python /ana/test_bpy.py 2>&1 | sed -n '1,200p'
+blender --background /path/to/scene.blend --python /path/to/script.py
 ```
 
-Example (re-annotate a saved debug blend):
+Note: Background renders may print noisy warnings (e.g. geometry-nodes dependency cycles). These are typically harmless.
 
-```bash
-mkdir -p /home/anadev/test_runs/reannotated
-blender --background --python /ana/test_reannotate_from_blend.py -- \
-  /path/to/*-blender_file.blend /home/anadev/test_runs/reannotated
+---
+
+## MASKS & INSTANCE SEGMENTATION
+
+### pass_index for Object Identification
+
+Each object of interest needs a unique `pass_index` for instance segmentation masks:
+
+```python
+obj.pass_index = unique_id  # Integer, must be unique per object of interest
+```
+
+### IndexOB Pass Setup
+
+```python
+# Enable IndexOB pass in render layers
+bpy.context.scene.view_layers[0].use_pass_object_index = True
+```
+
+### Debugging Empty Masks
+
+If `masks/*.png` is all-zero:
+
+1. **Check raw IndexOB** — is the underlying render pass empty?
+   - If yes: scene/camera/visibility issue (object not in frame, hidden collection, etc.)
+   - If no: compositor or mask pipeline issue
+
+2. **Check `pass_index`** — is it set and unique?
+3. **Check collection visibility** — is `hide_render = False`?
+4. **Check object visibility** — is `hide_render = False` on the object itself?
+
+### Minimum Feature Size
+
+Mask pipelines often drop polygons smaller than a threshold. If small objects (distant from camera) have nonzero mask IDs but empty annotations, check the minimum bounding box size filter.
+
+---
+
+## ANIMATIONS & ACTIONS
+
+### Applying Actions to Objects
+
+```python
+# Get an action by name
+action = bpy.data.actions.get('walk_cycle_01')
+if action is None:
+    logger.warning("Action 'walk_cycle_01' not found in blend file")
+
+# Apply action via NLA track
+armature = obj  # Must be an armature object
+if armature.animation_data is None:
+    armature.animation_data_create()
+
+track = armature.animation_data.nla_tracks.new()
+strip = track.strips.new(action.name, int(action.frame_range[0]), action)
+strip.action = action
+```
+
+### Listing Available Actions
+
+```python
+for action in sorted(bpy.data.actions, key=lambda a: a.name):
+    print(f"  {action.name}: frames {action.frame_range[0]:.0f}-{action.frame_range[1]:.0f}")
+```
+
+Always verify an action exists in `bpy.data.actions` before using it — action names vary between blend files.
+
+### Follow Path Constraints
+
+```python
+# Add follow-path constraint for character walking
+bpy.context.view_layer.objects.active = obj
+obj.select_set(True)
+bpy.ops.object.constraint_add(type='FOLLOW_PATH')
+constraint = obj.constraints['Follow Path']
+constraint.target = path_object  # A curve object
+constraint.use_curve_follow = True
+constraint.forward_axis = 'TRACK_NEGATIVE_Y'
 ```
 
 ---
 
-## Test Graphs
+## BLEND FILE INSPECTION
 
-- `graphs/warehouse_anomaly.yml`
-  - Warehouse Scene, multiple surveillance cameras
-  - Good for checking anomaly object placement and visibility
+### Headless Blend Inspection
 
-- `graphs/warehouse_conveyor.yml`
-  - Conveyor system with package placement
-  - Good for verifying object tracking and movement annotations
+```bash
+blender --background /path/to/scene.blend --python-expr "
+import bpy
+print('Objects:', len(bpy.data.objects))
+print('Actions:', [a.name for a in bpy.data.actions])
+print('Collections:', [c.name for c in bpy.data.collections])
+for obj in bpy.data.objects:
+    if obj.type == 'CAMERA':
+        print(f'Camera: {obj.name} at {tuple(obj.location)}')
+"
+```
 
----
+### Saving Debug Blend Snapshots
 
-## Implementation Pointers (where things live)
+Save a `.blend` after scene setup for post-run inspection:
 
-- Render/placement logic: `packages/SingleBlenderFile/SingleBlenderFile/nodes/warehouse_render.py`
-- Object annotation/metadata fields: `packages/SingleBlenderFile/SingleBlenderFile/lib/ana_object.py`
-- Warehouse/camera mappings: `SingleBlenderFile.lib.warehouse_data` (imports in `warehouse_render.py`)
+```python
+import os
+debug_path = os.path.join(ctx.output, 'test', f'{ctx.interp_num:010d}-debug.blend')
+os.makedirs(os.path.dirname(debug_path), exist_ok=True)
+bpy.ops.wm.save_as_mainfile(filepath=debug_path)
+```
 
----
+Gate behind an environment variable to avoid large files in production:
 
-## Warehouse / Camera Layout Notes (XY plane)
-
-Blender/world axes:
-
-- `+Z` is up.
-- In Blender **Top** view: image-right is `+X`, image-up is `+Y`.
-
-Axis-aligned warehouse layout reference is documented in:
-
-- `packages/SingleBlenderFile/SingleBlenderFile/docs/warehouse_layout.md`
-  - embedded image: `warehouse_top_view_labeled.png`
-
-Camera-cluster centroids (from `SingleBlenderFile.lib.warehouse_data.CAMERA_XY`):
-
-- **Receiving Area**: Entry point for packages
-  - Receiving centroid ≈ `(-20.0, -10.0)`
-- **Storage Zones A-D** are arranged in grid pattern:
-  - Zone A centroid ≈ `(-10.0, 0.0)`
-  - Zone B centroid ≈ `(10.0, 0.0)`
-  - Zone C centroid ≈ `(-10.0, 20.0)`
-  - Zone D centroid ≈ `(10.0, 20.0)`
-- **Shipping Area**: Exit point for processed packages
-  - Shipping centroid ≈ `(20.0, -10.0)`
+```python
+if os.environ.get('CHANNEL_SAVE_DEBUG_BLEND'):
+    bpy.ops.wm.save_as_mainfile(filepath=debug_path)
+```
 
 ---
 
-## Common Gotchas
+## MATERIALS & TEXTURES
 
-- `Visualize Anomaly Objects` is interpreted as a string in `warehouse_render.py` (expects `"Enabled"`).
-- Blender background runs may print geometry-nodes dependency cycle warnings; they can be noisy even when the run succeeds.
-- When debugging: prefer checking artifacts (`bbox3d_vis`, `annotations`, `metadata`) first, then the saved blend snapshot if placement seems wrong.
-- Anomaly objects must be properly tagged in collections to avoid being treated as warehouse infrastructure.
+### Loading Textures from Volumes
+
+```python
+from anatools.lib.package_utils import get_volume_path
+
+texture_path = get_volume_path('my_package', 'my_volume:textures/diffuse.png')
+image = bpy.data.images.load(texture_path)
+
+# Assign to a material's image texture node
+mat = bpy.data.materials['MyMaterial']
+nodes = mat.node_tree.nodes
+tex_node = nodes.get('Image Texture')
+if tex_node:
+    tex_node.image = image
+```
+
+### Randomizing Materials
+
+```python
+import random
+
+# Swap between material variants
+variants = [m for m in bpy.data.materials if m.name.startswith('Wood_')]
+if variants:
+    chosen = ctx.random.choice(variants)
+    obj.active_material = chosen
+```
+
+---
+
+## LIGHTING
+
+### Time-of-Day / Lighting Control
+
+A common pattern is exposing lighting as a node input and switching between presets:
+
+```python
+# Example: toggle sun lamp intensity
+sun = bpy.data.objects.get('Sun')
+if sun and sun.type == 'LIGHT':
+    if time_of_day == 'Night':
+        sun.data.energy = 0.1
+    else:
+        sun.data.energy = 5.0
+
+# Example: switch HDRI environment
+world = bpy.context.scene.world
+env_node = world.node_tree.nodes.get('Environment Texture')
+if env_node:
+    hdri_path = get_volume_path('my_package', f'my_volume:hdri/{time_of_day}.exr')
+    env_node.image = bpy.data.images.load(hdri_path)
+```
+
+---
+
+## COMMON GOTCHAS
+
+- **Dependency cycles**: Geometry Nodes can trigger noisy "dependency cycle detected" warnings in background mode. These are usually harmless.
+- **`bpy.context` in background mode**: Some operators require an active object or specific context. Use `bpy.context.view_layer.objects.active = obj` before operator calls.
+- **Frame numbering**: Always use `bpy.context.scene.frame_current` for consistent naming with AnaScene annotation conventions.
+- **Action names**: Never hardcode action names without checking `bpy.data.actions.get()` first — they vary between blend file versions.
+- **Euler rotation order**: Default is `'XYZ'`. Mixing rotation orders causes subtle orientation bugs.
+- **`view_layer.update()`**: Call after changing transforms if subsequent code reads back positions (e.g. checking camera visibility).
 
