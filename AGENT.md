@@ -118,6 +118,45 @@ from anatools.lib.file_object import FileObject
 return {"Output File": FileObject("/path/to/output.png")}  # or {} for terminal nodes
 ```
 
+### VolumeFile Node — Wiring a File Input
+
+To accept a file from a volume as a node input, declare it in the node schema with type `FileObject` and `numLinks: one`:
+
+```yaml
+# my_node.yml
+inputs:
+- name: Scene File
+  type: FileObject
+  validation:
+    numLinks: one
+```
+
+Read it in `exec()`:
+```python
+from anatools.lib.file_object import FileObject
+
+scene_file = self.inputs["Scene File"][0]
+path = scene_file.filename if isinstance(scene_file, FileObject) else str(scene_file)
+```
+
+**Graph YAML wiring** — `VolumeFile` value uses `UUID:/path` notation:
+```yaml
+Volume File_10:
+  nodeClass: VolumeFile
+  links: {}
+  values:
+    File: "708b0ca9-d81c-4679-b164-141418507830:/scenes/MyScene.blend"
+
+My Node_20:
+  nodeClass: My Node
+  links:
+    Scene File:
+      - outputPort: File
+        sourceNode: Volume File_10
+```
+
+The `VolumeFile` node resolves the UUID to the local volume path automatically (`./data/volumes/UUID/path` locally, `/data/volumes/UUID/path` on platform).
+
 ---
 
 ## NODE DEVELOPMENT

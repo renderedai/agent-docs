@@ -26,6 +26,38 @@ for obj in data_to.objects:
     bpy.context.scene.collection.objects.link(obj)
 ```
 
+### Appending Full-Scene Blend Files
+
+**Geometry location ≠ pivot location**
+`obj.matrix_world.translation` returns the pivot point, which is often `(0,0,0)` even when all geometry is offset in local space. Use bound_box corners to find where the mesh actually is:
+```python
+import mathutils
+corners = [obj.matrix_world @ mathutils.Vector(c) for c in obj.bound_box]
+xs = [c.x for c in corners]
+print(f"X extent: [{min(xs):.2f}, {max(xs):.2f}]")
+```
+
+**Always import the World datablock**
+`bpy.data.libraries.load()` does not pull in the World. Without it, environment lighting is missing and materials that reference the world render flat grey:
+```python
+with bpy.data.libraries.load(blend_path, link=False) as (data_from, data_to):
+    data_to.objects = list(data_from.objects)
+    data_to.worlds  = list(data_from.worlds)   # required for lighting
+for world in (data_to.worlds or []):
+    if world is not None:
+        bpy.context.scene.world = world
+        break
+```
+
+**Purge default startup objects**
+Artist blends often contain leftover Blender startup objects. Remove all cameras by type, and default mesh/light objects by exact name. Locale-specific Blender installs may rename defaults, so the type check covers those:
+```python
+DEFAULT = {("Cube","MESH"), ("Camera","CAMERA"), ("Light","LIGHT")}
+for obj in list(bpy.context.scene.collection.objects):
+    if obj.type == "CAMERA" or (obj.name, obj.type) in DEFAULT:
+        bpy.data.objects.remove(obj, do_unlink=True)
+```
+
 ### Scene Cleanup
 
 ```python
