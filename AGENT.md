@@ -161,6 +161,16 @@ The `VolumeFile` node resolves the UUID to the local volume path automatically (
 
 ## NODE DEVELOPMENT
 
+### Regenerating node_data.json (CRITICAL)
+
+`node_data.json` is **auto-generated** by `anautils`. **Never edit it directly.** After any change to a node YAML schema, regenerate it:
+
+```bash
+cd /workspace/ana && anautils --channel toybox.yml
+```
+
+Editing `node_data.json` by hand will be overwritten and may corrupt the node registry.
+
 ### Schema Structure
 ```yaml
 schemas:
@@ -194,6 +204,22 @@ distance = float(self.inputs["Distance"])   # TypeError!
 - `float(self.inputs["Scale X"][0])`
 - `int(self.inputs["Number of Objects"][0])`
 - `self.inputs["Options"][0]`
+
+### Optional Input Sentinel (Platform Behaviour)
+
+When a user removes a link from an optional input in the platform UI, the platform sets that input to `""` (empty string) — it is **not** omitted and is **not** `None`. Passing `""` directly to `AnaScene.add_object()` or similar will crash with an `AttributeError`.
+
+Always filter optional inputs before use:
+
+```python
+# ✅ Safe pattern for optional object lists (e.g. Placed Objects, Lights)
+objects = [o for o in _flatten(self.inputs.get("Placed Objects", [])) if o and o != ""]
+
+# ✅ Safe pattern for optional scalar/string inputs
+hdri_rotation = float((self.inputs.get("HDRI Rotation (deg)") or [0.0])[0])
+```
+
+This affects every optional input in every node — not just scene aggregators.
 
 ### Critical Rules
 - **Graphs reference `alias`**, not class name: `nodeClass: My Node`

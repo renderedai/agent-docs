@@ -404,13 +404,47 @@ if sun and sun.type == 'LIGHT':
     else:
         sun.data.energy = 5.0
 
-# Example: switch HDRI environment
+# Example: switch HDRI environment (world already has node tree)
 world = bpy.context.scene.world
 env_node = world.node_tree.nodes.get('Environment Texture')
 if env_node:
     hdri_path = get_volume_path('my_package', f'my_volume:hdri/{time_of_day}.exr')
     env_node.image = bpy.data.images.load(hdri_path)
 ```
+
+### Building an HDRI World Node Tree from Scratch
+
+Use this when no world exists yet (e.g. procedural scenes, or after `tree.nodes.clear()`). The full chain is: **TexCoord → Mapping → EnvironmentTexture → Background → WorldOutput**. The Mapping node's Z rotation controls azimuth.
+
+```python
+import math, os
+import bpy
+
+def apply_hdri(file_path, rotation_deg=0.0):
+    scn = bpy.context.scene
+    if scn.world is None:
+        scn.world = bpy.data.worlds.new("World")
+    scn.world.use_nodes = True
+    tree = scn.world.node_tree
+    tree.nodes.clear()
+
+    out        = tree.nodes.new('ShaderNodeOutputWorld')
+    background = tree.nodes.new('ShaderNodeBackground')
+    env        = tree.nodes.new('ShaderNodeTexEnvironment')
+    mapping    = tree.nodes.new('ShaderNodeMapping')
+    tex_coord  = tree.nodes.new('ShaderNodeTexCoord')
+
+    env.image = bpy.data.images.load(os.path.abspath(file_path))
+    background.inputs['Strength'].default_value = 1.0
+    mapping.inputs['Rotation'].default_value[2] = math.radians(rotation_deg)  # azimuth
+
+    tree.links.new(tex_coord.outputs['Generated'],    mapping.inputs['Vector'])
+    tree.links.new(mapping.outputs['Vector'],          env.inputs['Vector'])
+    tree.links.new(env.outputs['Color'],               background.inputs['Color'])
+    tree.links.new(background.outputs['Background'],   out.inputs['Surface'])
+```
+
+> **Note**: `bpy.data.images.load()` requires an absolute path. Use `os.path.abspath()` on volume-resolved paths.
 
 ---
 
