@@ -123,11 +123,76 @@ client.cancel_dataset(datasetId="DATASET_UUID")
 
 ---
 
-## DOWNLOADING DATASETS
+## ACCESSING DATASETS
+
+The **recommended** way to access dataset outputs is `anamount` — it mounts
+the workspace's full S3 bucket as a read-only FUSE filesystem, giving
+random-access read of every dataset's `envi_truth/`, `radiance/`,
+`annotations/`, `metadata/`, `graph.json`, and `reports/` without any
+local copy. This is fast for inspecting one or two files and avoids
+gigabytes of unnecessary downloads.
+
+### Mount a workspace (recommended)
+
+```bash
+# Mount one workspace under /workspace/datasets (creates the mountpoint).
+# `anamount` reads RENDEREDAI_API_KEY from the environment.
+mkdir -p /workspace/datasets
+anamount --workspaces <WORKSPACE_UUID> --path /workspace/datasets --environment prod
+
+# Datasets then live under
+#   /workspace/datasets/workspaces/<WORKSPACE_UUID>/datasets/<DATASET_UUID>/
+# e.g.
+ls /workspace/datasets/workspaces/<WORKSPACE_UUID>/datasets/<DATASET_UUID>/
+# annotations  envi_truth  graph.json  images  metadata  radiance  reports
+
+# Other useful flags:
+#   --volumes <VOLUME_UUID>[,<VOLUME_UUID>,...]   mount one or more volumes
+#   --channel <channelName>                       mount all volumes for a channel
+#   --unmount                                     unmount current mount
+#   --unmountall                                  unmount everything
+
+# Look up the owning workspace for a dataset id with the SDK:
+python3 -c "
+import anatools
+c = anatools.client(environment='prod', verbose='quiet')
+for ws in c.get_workspaces(organizationId='<ORG_UUID>'):
+    for ds in c.get_datasets(workspaceId=ws['workspaceId']) or []:
+        if ds['datasetId'] == '<DATASET_UUID>':
+            print(ws['workspaceId'], ws['name'])
+"
+```
+
+Mounts are persistent until you `--unmount` or the host reboots; multiple
+workspaces/volumes can be mounted side by side under the same `--path`.
+
+### Download as zip (alternative)
+
+Use when you need the data on a host without FUSE, want an offline copy,
+or are pulling files into an environment that can't speak S3 directly.
 
 ```python
+# Bulk SDK download (entire dataset to cwd).
 client.download_dataset(datasetId="DATASET_UUID")
 ```
+
+```bash
+# CLI equivalent with filters / parallel workers.
+anatools-download-dataset \
+    --datasetid <DATASET_UUID> \
+    --workspaceid <WORKSPACE_UUID> \
+    --path images \
+    --local-dir ./out \
+    --workers 8
+```
+
+Tradeoffs vs `anamount`:
+
+- ✓ Works without FUSE / `goofys`.
+- ✓ Self-contained tarball you can move offline.
+- ✗ Pulls every file you ask for (no random access); large datasets
+  (~tens of GiB per HSI run) take time and disk.
+- ✗ Stale: a re-run of the dataset on the platform requires re-download.
 
 ---
 
