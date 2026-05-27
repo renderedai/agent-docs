@@ -159,8 +159,9 @@ tooltip: Short description shown in the graph editor.
 inputs:
   - name: Input Port
     description: What this port receives.
-    default: null
-    link: true              # required for the port to accept links
+    default: ""
+    validation:
+      numLinks: one         # accept exactly one wired connection
   - name: Setting Name
     description: A user-configurable value.
     default: 'some default'
@@ -169,13 +170,71 @@ inputs:
       - option B
 outputs:
   - name: Output Port
-    validation:
-      numLinks: zeroOrMany  # optional; omit for default (one link)
 ```
 
-**`link: true` is required** for any port that should accept connections from other nodes. Ports without it are values-only.
+Link-acceptance is controlled by `validation.numLinks`. Valid values: `zero`, `zeroOrOne`, `zeroOrMany`, `one`, `oneOrMany`. The legacy `link: true` property is no longer used by anatools or any current toybox schema — don't add it.
 
-Valid `numLinks` values: `zero`, `zeroOrOne`, `zeroOrMany`, `one`, `oneOrMany`.
+### Schema validation
+
+Validation runs in **three places** with different strictness. Knowing which tier produces which symptom saves a lot of debugging:
+
+| Tier | Where | Strictness | Symptom on failure |
+|---|---|---|---|
+| **Editor** (browser) | renderedai web UI | Strict JSON Schema | Red border on input fields; the user can't save the graph |
+| **Channel load** (`anautils`) | `anautils --channel ...` | Lax — accepts non-standard extensions | `anautils` errors at load |
+| **Runtime** (`exec()`) | `ana --graph ...` | Whatever the Python code accepts | Stack trace in the run log |
+
+A schema that passes `anautils` and runs cleanly via `ana` can still light up red in the editor. When red borders appear, the bug is almost always in the editor-tier schema, not in your Python.
+
+#### Legal `type:` values
+
+JSON Schema only defines `string`, `number`, `integer`, `boolean`, `array`, `object`, `null`.
+
+**`type: float` is invalid** — it slips past `anautils` but the editor's strict validator rejects the branch silently, leaving `oneOf` with no valid match. Use `type: number` for both ints and floats.
+
+#### `oneOf` requires exactly one match
+
+Two combinations to avoid:
+
+- **`type: string` + `type: array`** — the editor coerces bracket-form strings (`"[0, 0, 1]"`) into arrays for validation, so both branches match → `oneOf` fails. Drop the string branch and use a YAML array-form default (`default: [0, 0, 1]`).
+- **Two scalar types** (e.g. `type: number` + `type: integer`) — every integer is a number, so both match. Use just `type: number`.
+
+`numLinks: <X>` branches are safe to combine with `type:` branches because they gate on whether the port is wired, not on the value's type.
+
+#### Default value must match a `oneOf` branch
+
+A freshly-dragged node initialises every input from its `default:`. If the default's YAML type doesn't match any branch, the field renders red on a clean canvas. Quick check: if the schema has only `type: array`, the default must be a YAML flow-sequence (`[1, 2, 3]`), not a quoted string (`"[1, 2, 3]"`).
+
+#### Canonical Vector3D-shaped port
+
+Three-element float ports that accept either a typed-in literal or a wired `Vector3D` node use this exact pattern:
+
+```yaml
+- name: Location (m)
+  default: [0.0, 0.0, 2.0]
+  description: World-space XYZ. Type [x, y, z] or wire a Vector3D node.
+  validation:
+    oneOf:
+      - numLinks: one
+      - type: array
+        items:
+          type: number
+          minimum: -10000
+          maximum: 10000
+        minItems: 3
+        maxItems: 3
+```
+
+Python-side, accept both list-form (from the editor) and bracket-string-form (from older graph YAMLs):
+
+```python
+from toybox.lib.parsers import parse_vec3
+
+x, y, z = parse_vec3(self.inputs["Location (m)"][0],
+                     name="Location (m)", node="My Node")
+```
+
+The shared `parse_vec3` helper handles both forms.
 
 ### `node_data.json` — never edit by hand
 
@@ -410,7 +469,8 @@ Check the channel-specific docs for available flags.
 | Code change not picked up in container | Only Dockerfile/requirements changes rebuild the image; `.py`/`.yaml` changes flow live via bind mount — no action needed |
 | No `--loglevel INFO` → logfile and platform logs empty | Always pass `--loglevel INFO` |
 | Non-deterministic results with same seed | Use `ctx.random`; `sorted()` all `glob`/`listdir` results; never call `import random` unseeded |
-| Port missing `link: true` in schema YAML → "Unable to find target port" | Add `link: true` to the port definition |
+| Port has no `validation.numLinks` → "Unable to find target port" | Add `validation: { numLinks: one }` (or `oneOrMany` etc.) to the port definition. The legacy `link: true` property no longer works |
+| Red border on an input field in the editor, but `ana --graph ...` runs fine | Editor-tier validation failure. Common causes: `type: float` (use `number`), `oneOf` with both `type: string` and `type: array` (drop `type: string`), or `default:` whose YAML type doesn't match any `oneOf` branch. See "Schema validation" |
 | Stale node hash in graph YAML → same "Unable to find target port" | Update hash + `ports:` block to current version — see `AGENT_GRAPH.md` |
 | `print()` for debugging → nothing in platform logs | Use `logger.info()` |
 | `FileObject.path` or `DirectoryObject.path` → `AttributeError` or silent `None` | Use `.filename` / `.directory` |
