@@ -113,13 +113,15 @@ class MyNode(AnaNode):
         # Safe access with default
         setting = self.inputs.get("Optional Port", ["default value"])[0]
 
-        # Write outputs
-        self.outputs["Output Port"] = result
+        # Return outputs as a dict (toybox convention) ...
+        return {"Output Port": result}
+        # ... or assign and let the framework collect them
+        # self.outputs["Output Port"] = result
 ```
 
 - **`self.inputs` is always a list** — direct access without `[0]` returns the list, not the value. This is a silent bug with no error.
 - `self.inputs` merges `values:` and linked node outputs — linked values override `values:`.
-- `self.outputs` keys must match `ports.outputs` names.
+- **Output keys must exactly match the YAML `outputs[].name` strings** — whether returned as a dict or assigned via `self.outputs[...]`. A mismatch is silent at runtime: the platform looks up the schema-declared key, finds nothing, and downstream consumers receive an empty value. **When you rename an output port in YAML, update the matching key in `exec()` in the same edit.**
 - `ctx.output` — write all output files here.
 - `ctx.seed` — per-run integer seed.
 - `ctx.random` — pre-seeded `numpy.RandomState`; use this instead of calling `np.random.*` directly.
