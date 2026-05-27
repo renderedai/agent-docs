@@ -419,6 +419,9 @@ Check the channel-specific docs for available flags.
 | `remove_nodes` / `add_nodes` uses class name → silently ignored | Use the **alias** |
 | Schema not found → `Schema for 'X' not found` | Check schema `.yml` exists, package listed in channel config, `name` matches Python class exactly |
 | Asset not loading | Verify volume UUID and `get_volume_path()` usage; never hardcode UUIDs |
+| `OSError: load: /data/volumes/<uuid>/... failed to open blend file` | Container can't see the volume. Check `ls -l /workspace/volumes/<uuid>` — if missing or broken, run `anamount` or recreate the symlink to wherever the volume data lives on disk (often `/workspace/data/volumes/<uuid>/`). See "Local volume staging" below. |
+| `anamount --path data` → `[Errno 17] File exists: 'data'` | The target directory already exists with cached volume data. `anamount` won't overwrite it. Either `--unmountall` first, choose a fresh `--path`, or skip `anamount` and create the symlinks manually (see "Local volume staging"). |
+| `ana --data ../data` doesn't fix missing-file errors | `--data` only retargets the host-side search root the wrapper inspects to build the bind-mount list. It does **not** override `/data/volumes/<uuid>` inside the container, and it does **not** rescue stale `/workspace/volumes/<uuid>` symlinks. Fix the symlinks instead. |
 | Node not registered | Run `anautils --channel my-channel.yml` to regenerate `node_data.json` |
 | Annotations missing for processed images | Filename convention mismatch — all nodes must use `{interp_num:010d}-{frame_current}-{sensor}` format |
 
@@ -477,6 +480,24 @@ anamount [--channel CHANNEL] [--volumes ID1,ID2] [--workspaces ID1,ID2]
 | `--unmount` / `--unmountall` | Unmount current / all mounts |
 
 Volumes appear at `<path>/<uuid>/` and are symlinked from `/workspace/volumes/<uuid>`, which the `ana` wrapper auto-mounts into the container at `/data/volumes/<uuid>`.
+
+The container **only** bind-mounts `/workspace/volumes/<uuid>` → `/data/volumes/<uuid>`. Other host directories (e.g. `/workspace/data/`) are invisible to the container, and `ana --data PATH` does not change this — it only retargets the host-side search root the wrapper inspects when building its bind-mount list.
+
+#### Local volume staging (when volumes are already cached on disk)
+
+Workspaces sometimes ship with volume data pre-staged under `/workspace/data/volumes/<uuid>/` rather than already symlinked. In that case `anamount --path data` will fail with `[Errno 17] File exists: 'data'` because it won't overwrite an existing directory.
+
+Skip `anamount` and recreate the symlinks the `ana` wrapper expects directly:
+
+```bash
+cd /workspace/volumes
+for d in /workspace/data/volumes/*/; do
+  uuid=$(basename "$d")
+  ln -sfn "$d" "$uuid"
+done
+```
+
+After this, `ana --graph ...` will resolve `/data/volumes/<uuid>/...` correctly. No `--data` flag needed.
 
 ---
 
