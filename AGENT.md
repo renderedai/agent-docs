@@ -481,7 +481,8 @@ Check the channel-specific docs for available flags.
 | `remove_nodes` / `add_nodes` uses class name → silently ignored | Use the **alias** |
 | Schema not found → `Schema for 'X' not found` | Check schema `.yml` exists, package listed in channel config, `name` matches Python class exactly |
 | Asset not loading | Verify volume UUID and `get_volume_path()` usage; never hardcode UUIDs |
-| `OSError: load: /data/volumes/<uuid>/... failed to open blend file` | Container can't see the volume. Check `ls -l /workspace/volumes/<uuid>` — if missing or broken, run `anamount` or recreate the symlink to wherever the volume data lives on disk (often `/workspace/data/volumes/<uuid>/`). See "Local volume staging" below. |
+| `OSError: load: /data/volumes/<uuid>/... failed to open blend file` | Container can't see the volume. Check `ls -l /workspace/volumes/<uuid>` — if missing or broken, run `anamount` or recreate the symlink to wherever the volume data lives on disk (often `/workspace/data/volumes/<uuid>/` or `~/.renderedai/volumes/<uuid>/`). See "Local volume staging" and "Stale mounts" below. |
+| `ls /workspace/volumes/<uuid>/` is empty but `~/.renderedai/.mounts.json` shows the volume `mounted` | The host-side `goofys` mount has died (mountpath now an empty dir) while the symlink still points at it. Remount via the recipe in "Stale mounts" below. **⚠ Do not blindly run `anamount --unmount` — it can kill the SSH session if any `parentpid` in `.mounts.json` is an ancestor of your shell. See the danger callout in "Stale mounts".** |
 | `anamount --path data` → `[Errno 17] File exists: 'data'` | The target directory already exists with cached volume data. `anamount` won't overwrite it. Either `--unmountall` first, choose a fresh `--path`, or skip `anamount` and create the symlinks manually (see "Local volume staging"). |
 | `ana --data ../data` doesn't fix missing-file errors | `--data` only retargets the host-side search root the wrapper inspects to build the bind-mount list. It does **not** override `/data/volumes/<uuid>` inside the container, and it does **not** rescue stale `/workspace/volumes/<uuid>` symlinks. Fix the symlinks instead. |
 | Node not registered | Run `anautils --channel my-channel.yml` to regenerate `node_data.json` |
@@ -560,6 +561,45 @@ done
 ```
 
 After this, `ana --graph ...` will resolve `/data/volumes/<uuid>/...` correctly. No `--data` flag needed.
+
+#### Stale mounts (live `goofys` mount went away)
+
+Symptom: `~/.renderedai/.mounts.json` says volumes are `mounted`, but `ls ~/.renderedai/volumes/<uuid>/` (or the symlink that points there) returns an empty directory, and a graph run fails with `OSError: load: /data/volumes/<uuid>/... failed to open blend file`. This happens when the host-side `goofys` FUSE mount has died — either because its parent shell exited, the network blip killed it, or it was never re-established after a container restart.
+
+> ⚠️ **DANGER — `anamount --unmount` can disconnect your SSH session.**
+> The `parentpid` field in `~/.renderedai/.mounts.json` is the PID of the shell that originally spawned the goofys mount. If any `parentpid` is an ancestor of the shell that runs `--unmount`, that shell (and the SSH session above it) is killed when goofys exits.
+>
+> **Empirically observed (2026-05-28): even when `pstree -ps $$` from a one-shot diagnostic shell shows no overlap with the parentpids, running `anamount --unmount` from a Windsurf/Cursor/VSCode-managed remote shell still disconnected the user's SSH session.** The IDE's command-execution shells share session/credential context with the SSH connection in ways that aren't visible to a `pstree` check. **Do not run `anamount --unmount` from an agent-driven `run_command` / IDE terminal.** Run it only from a terminal you opened yourself, where you accept the risk of that one terminal getting killed.
+>
+> Before running it from *any* shell, run the check:
+> ```bash
+> jq -r '.volumes[] | "\(.name)\t\(.parentpid)"' ~/.renderedai/.mounts.json
+> echo "my shell ancestry: $$ $PPID"; pstree -ps $$ | head -3
+> ```
+> If any `parentpid` matches your shell ancestry, that shell will die.
+>
+> **Safer alternatives that avoid `--unmount` entirely:**
+> - If the live `~/.renderedai/volumes/<uuid>/` mounts still have content, just rebuild the `/workspace/volumes/<uuid>` symlinks by hand (see "Local volume staging" above). No process gets killed.
+> - If the goofys processes themselves are dead (`kill -0 <parentpid>` fails), the entries in `.mounts.json` are already stale; calling `anamount --path data` directly (in a fresh dedicated terminal) often re-establishes them without needing `--unmount` first.
+> - If `anamount --path data` then fails with `[Errno 17] File exists: '/home/ubuntu/.renderedai/volumes/<uuid>'` and `stat ~/.renderedai/volumes/<uuid>` returns `Transport endpoint is not connected`, the kernel is still holding stale FUSE mountpoints from the dead goofys procs. Lazy-unmount each before retrying — this only touches the specific mountpoint, doesn't kill any process, and avoids `anamount --unmount` entirely:
+>   ```bash
+>   for u in $(ls ~/.renderedai/volumes/); do
+>     fusermount -uz ~/.renderedai/volumes/$u && echo "released $u"
+>   done
+>   # then in a dedicated terminal:
+>   cd /workspace/ana && anamount --path data
+>   ```
+
+Fix recipe (only when safe per the check above), from `/workspace/ana`, in a **dedicated terminal**:
+
+```bash
+anamount --unmount         # tears down half-dead entries -- see warning above
+anamount --path data       # remounts under ./data (foreground; keep this terminal open)
+```
+
+`anamount --path data` blocks while it holds the `goofys` mounts alive — closing the terminal unmounts them. Open a second terminal for `ana --graph ...` and other work. The mounts appear at `/workspace/ana/data/volumes/<uuid>/` and the `ana` wrapper's bind-mount logic picks them up automatically (no `--data` flag needed if the symlinks under `/workspace/volumes/` already point at the same place, otherwise rebuild them as in "Local volume staging" above).
+
+Verify with `ls /workspace/volumes/<uuid>/` showing actual files before re-running the graph.
 
 ---
 
