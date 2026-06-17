@@ -341,19 +341,23 @@ scene_obj = generator.exec()
 
 ## CHANNEL CONFIG
 
-The channel YAML declares remotes and node overrides:
+The channel YAML declares the channel type, packages, remotes, and node overrides. Top-level keys recognised by `anatools.lib.channel.Channel` (verified in `anatools/lib/channel.py`):
+
+| Key | Purpose |
+|---|---|
+| `channel:` | Sub-keys are limited to `type` (`blender` \| `python` \| `omniverse`) and `base` (for inheritance). **`description` does NOT belong here** — it lives under `remotes:`. |
+| `add_setup:` / `remove_setup:` | Modules whose `setup()` runs before graph interpretation |
+| `add_packages:` / `remove_packages:` | Python packages contributing nodes |
+| `add_nodes:` / `remove_nodes:` / `rename_nodes:` | Per-node overrides |
+| `default_execution_flags:` | Default values for `ana` CLI flags (local only) |
+| `remotes:` | List of platform deployment targets — this is what `anadeploy` reads |
 
 ```yaml
-channels:
-  - name: My Channel Dev
-    channelId: <UUID>
-    instance: g5.4xlarge
-    volumes:
-      - volumeId: <UUID>
-        mountPath: /path/in/container
+channel:
+  type: blender   # or 'python' or 'omniverse'
 
-remove_nodes:
-  - Node Alias Here    # ✅ alias, not class name
+add_packages:
+  - my_package
 
 add_nodes:
   - package: anatools
@@ -362,14 +366,106 @@ add_nodes:
     category: Common
     subcategory: Values
     color: "#B3B3B3"
+    help: my_package/RandomInteger.md   # optional help md (resolves to packages/my_package/my_package/docs/)
+
+remove_nodes:
+  - Node Alias Here    # ✅ alias, not class name
+
+remotes:
+  - channelId: <UUID>
+    name: my-channel-prod
+    description: "One-line summary shown on the platform channel page."
+    instance: g5.4xlarge
+    timeout: 7200
+    volumes:               # optional; otherwise inferred from packages
+      - <volume-UUID>
 ```
 
 - **`instance`** controls pod RAM/GPU.
+- **`timeout`** is the maximum runtime in seconds (default 120).
+- **`description`** is read from `remotes[i].description` by `anadeploy` and pushed via `client.edit_channel(description=...)` whenever it differs from what's on the platform. **Empty strings are skipped** (`if description and description != remote['description']` short-circuits on falsy), so a real string is required to update.
 - **`remove_nodes`** uses the **alias**, not class name. Using category (`Generators.AFV`) or class name silently does nothing.
 - **`add_nodes`** is only needed for: anatools built-in nodes, overriding display properties, or nodes from external packages not in the channel's package list. All nodes in included packages are **automatically registered**.
+- **`name`, `description`, `instance`, `timeout`, `volumes`** can also be edited post-deploy via `client.edit_channel(channelId, ...)` without redeploying the docker image.
 - If `Schema for 'MyClass' not found`: check the `.yml` schema exists in `nodes/`, the package is in the channel config, and the `name` matches the Python class name exactly.
 
 Full list of available anatools nodes: https://support.rendered.ai/development-guides/ana-software-architecture/the-anatools-package
+
+---
+
+## CHANNEL DOCUMENTATION
+
+The platform displays a single markdown file as the channel's documentation page, plus per-node help md files surfaced from the "i" icon on each node.
+
+### Channel-level doc — must be `docs/channel.md`
+
+```
+<channel root>/
+├── docs/
+│   ├── channel.md          # REQUIRED filename — anything else is ignored
+│   ├── image1.png          # optional supporting assets
+│   └── output/example.png  # subdirectories OK; references are relative to docs/
+```
+
+- The filename `channel.md` is **hard-coded** in `anautils` (`os.path.join(args.output, 'channel.md')`). A renamed file (e.g. `replicator-tutorials.md`) silently does not surface on the platform.
+- Image and asset references inside `channel.md` are relative to `docs/`, e.g. `![demo](output/example.png)`.
+
+### Per-node help docs
+
+Lives **inside the package**, not in the top-level `docs/`:
+
+```
+packages/<pkg>/<pkg>/docs/
+├── __init__.py             # REQUIRED — must exist (can be empty) so the Python
+│                           #            package manager finds the docs directory
+├── MyNode.md
+├── MyNode.png              # optional thumbnail
+└── ...
+```
+
+Reference them from the node schema YAML:
+
+```yaml
+schemas:
+  MyNodeClass:
+    alias: My Node
+    help: my_package/MyNode.md       # resolves to packages/my_package/my_package/docs/MyNode.md
+    thumbnail: my_package/MyNode.png # optional; shown when hovering over the node tray entry
+    ...
+```
+
+- The `help:` and `thumbnail:` paths are encoded as `<package_name>/<file>` — the literal `docs/` is **not** in the path; it's added by the resolver.
+- Both attributes are optional. If absent, no help icon / thumbnail appears.
+
+### Validating docs before deploy
+
+```bash
+# Compile docs into /tmp and report broken md/png references
+anautils --mode=help --output=/tmp/
+
+# Or generate a fresh channel.md scaffold from the channel's node list
+anautils --channel my-channel.yml --mode docs
+```
+
+Run these before `anadeploy` — broken doc references will fail the deploy.
+
+### Updating docs without redeploying the image
+
+```python
+import anatools
+client = anatools.AnaClient()
+
+# Push the channel page only
+client.upload_channel_documentation(
+    channelId="<UUID>",
+    mdfile="docs/channel.md",
+)
+
+# Or update metadata fields (description, name, instance, timeout, volumes)
+client.edit_channel(channelId="<UUID>", description="New tagline.")
+```
+
+`upload_channel_documentation` accepts any `.md` file by basename — useful when iterating on copy without rebuilding the docker image.
 
 ---
 
@@ -487,6 +583,10 @@ Check the channel-specific docs for available flags.
 | `ana --data ../data` doesn't fix missing-file errors | `--data` only retargets the host-side search root the wrapper inspects to build the bind-mount list. It does **not** override `/data/volumes/<uuid>` inside the container, and it does **not** rescue stale `/workspace/volumes/<uuid>` symlinks. Fix the symlinks instead. |
 | Node not registered | Run `anautils --channel my-channel.yml` to regenerate `node_data.json` |
 | Annotations missing for processed images | Filename convention mismatch — all nodes must use `{interp_num:010d}-{frame_current}-{sensor}` format |
+| Channel doc page on the platform is blank / missing | Channel doc must be exactly `docs/channel.md` (filename hard-coded in `anautils`). Renaming or nesting it hides the page. |
+| Per-node "i" help icon missing | (1) Schema is missing `help: <package>/<file>.md`, (2) the md file isn't under `packages/<pkg>/<pkg>/docs/`, or (3) `packages/<pkg>/<pkg>/docs/__init__.py` doesn't exist. |
+| Channel description still empty on the platform after redeploy | `description: ""` under `remotes:` is skipped by `anadeploy`. Set a real string, or call `client.edit_channel(channelId, description=...)` directly. **`description` does not belong under the top-level `channel:` block** — only `type` and `base` are read there. |
+| `anadeploy` fails complaining about a broken md/png reference | Pre-validate with `anautils --mode=help --output=/tmp/` and fix the path before redeploying. |
 
 ---
 
@@ -524,6 +624,35 @@ anadeploy [--channel CHANNELFILE] [--channelId UUID]
 ```
 
 Reads `.devcontainer/Dockerfile` and the channel `*.yml` config. Builds and pushes the Docker image, then registers the new version on the platform.
+
+The deploy step also pushes any changes to **`name`, `description`, `instance`, `timeout`, `volumes`** from the matching `remotes:` entry. Empty `description: ""` is skipped — populate the field for it to update on the platform.
+
+---
+
+### `anautils` — channel introspection / docs / schema
+
+```
+anautils [--channel CHANNELFILE] [--mode MODE] [--output PATH]
+```
+
+| Mode | Purpose |
+|------|---------|
+| `schema` (default) | Generate the JSON node schema and print category/subcategory/color summary. Writes `node_data.json`. |
+| `docs` | Scaffold `channel.md` (a markdown table of nodes) from the channel's schemas. |
+| `help` | Compile per-node help docs and validate `help:` / `thumbnail:` references. Use this to catch broken md/png paths **before** `anadeploy`. |
+
+```bash
+# Regenerate node_data.json after editing any node schema yaml
+anautils --channel my-channel.yml
+
+# Validate channel + node docs end-to-end (broken references error out)
+anautils --mode=help --output=/tmp/
+
+# Regenerate a starter channel.md from the current node list
+anautils --channel my-channel.yml --mode docs
+```
+
+`anautils --mode=help` is run automatically inside `anadeploy`. If your deploy fails at the documentation step, run it locally first and read the error.
 
 ---
 
