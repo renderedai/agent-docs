@@ -5,7 +5,7 @@ Operational guide for AI agents and engineers developing **services** on the Ren
 > **Disambiguation.** "Studio" in the Rendered.ai ecosystem refers to two distinct products with different platform architectures:
 >
 > - **Agent Studio** (this doc) — the workspace/service-development environment you are currently in. Files live under `/workspace/`, services run via the MCP server or the `renderedai` CLI, source datasets and persistent artifacts are FUSE-mounted from platform storage.
-> - **Channel studio / synthetic-data channels** — the renderer-driven simulation product (Blender / DIRSIG / etc.). Covered by the other docs in this folder: `AGENT.md`, `AGENT_BLENDER.md`, `AGENT_DIRSIG.md`, `AGENT_GRAPH.md`, `AGENT_legacy.md`.
+> - **Channel studio / synthetic-data channels** — the renderer-driven simulation product (Blender / DIRSIG / etc.). Covered by the other docs in this folder: `AGENT.md`, `AGENT_BLENDER.md`, `AGENT_DIRSIG.md`, `AGENT_GRAPH.md`.
 >
 > Both products share the same `renderedai` Platform CLI (shipped by the `anatools` package). The CLI is documented in the [`renderedai-cli` SKILL.md](https://github.com/renderedai/anatools/blob/8f94b288d672ebc676a2e25b959058e61389eb72/skills/renderedai-cli/SKILL.md). **This doc does not redocument the CLI** — when you need command syntax, read SKILL.md or run `renderedai --help`.
 

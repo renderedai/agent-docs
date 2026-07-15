@@ -12,7 +12,7 @@ Guides for agentically developing services that run on the Rendered.ai platform.
 
 Guides for authoring synthetic data channels (renderers and simulators):
 
-- **[AGENT.md](AGENT.md)** — SingleBlenderFile V1 (`reid-v1` / `charactersQA`) channel: `CameraDwellRender` node, character nodes, room reference, render performance, deployment, and common mistakes.
+- **[AGENT.md](AGENT.md)** — General Rendered.ai channel development: node/package/Dockerfile anatomy, the local `ana` dev container and path mappings, node class structure and anatools object types, package volumes, channel config, determinism, annotations, deployment workflow, and common mistakes.
 - **[AGENT_BLENDER.md](AGENT_BLENDER.md)** — Blender-specific patterns: scene management, materials, lighting, cameras, and rendering within Rendered.ai channels.
 - **[AGENT_DIRSIG.md](AGENT_DIRSIG.md)** — DIRSIG-specific patterns: the `dirfm` driver library, glist object/instance model, motion/flex-motion engines, platform sensors, truth-band annotations, and the `DIRSIG5` simulation lifecycle.
 - **[AGENT_OMNIVERSE.md](AGENT_OMNIVERSE.md)** — Omniverse / Replicator-specific patterns: the declarative-graph mental model, randomizer contract, custom writer + annotators, preview mode, determinism with `rep.set_global_seed`, and stage-state leaks.
