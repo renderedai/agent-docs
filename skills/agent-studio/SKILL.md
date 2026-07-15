@@ -8,7 +8,7 @@ argument-hint: "where should I write training output?", "why did my training cra
 
 Operational reference for AI agents and engineers developing **services** on the Rendered.ai **Agent Studio** platform — the workspace runtime where you build, test, and deploy long-running and on-demand services (ML pipelines, data processors, API workers) that interact with platform resources (datasets, volumes, models, channels).
 
-This skill applies to **first- and third-party service developers** working inside an Agent Studio workspace. It does **not** cover synthetic-data channel authoring (Blender/DIRSIG/[redacted] renderers) — those live in their own channel-development guides.
+This skill applies to **first- and third-party service developers** working inside an Agent Studio workspace. It does **not** cover synthetic-data channel authoring (Blender/DIRSIG renderers) — those live in their own channel-development guides.
 
 ## When to use this skill
 
